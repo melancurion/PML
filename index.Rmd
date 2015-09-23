@@ -1,0 +1,327 @@
+---
+output: html_document
+---
+# Machine Learning Project - Weight Lifting Dataset
+
+Author: melancurion
+September 2015
+
+## Synopsis
+
+This report summarizes the design decisions, execution, and results of a prediction analysis based on the Weight Lifting Dataset described at the following URL:
+
+http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises
+
+The purpose of this exercise is to predict the predict the manner in which 6 participants in the cited Human Activity Recognition trial did the exercise, based on data from accelerometers on their belt, forearm, arm, and dumbell. They were asked to perform Unilateral Dumbbell Biceps Curl correctly and incorrectly in 5 different ways, as summarized below:
+
+* exactly according to the specification (Class A)
+
+* throwing the elbows to the front (Class B)
+
+* lifting the dumbbell only halfway (Class C)
+
+* lowering the dumbbell only halfway (Class D)
+
+* throwing the hips to the front (Class E).
+
+The prediction takes the form of the appropriate character identifier (A, B, C, D, or E) for each of the 20 test cases included in the *testing* dataset, from which the 'classe' variable has been omitted. The *training* dataset includes the 'classe' values for all observations.
+
+The *training* and *testing* datasets were pre-allocated prior to commencement of this exercise. These are available respectively at
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv and
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The full dataset of which these *training* and *testing* datasets are subsets is available at
+
+http://groupware.les.inf.puc-rio.br/static/WLE/WearableComputing_weight_lifting_exercises_biceps_curl_variations.csv
+
+## Prediction Study Design
+
+### Performance targets
+
+We elect to set the target prediction parameters as follows:
+
+* Total accuracy: 0.99 or better
+
+* Type I and Type II error rates: 0.01 or better
+
+### Data split
+
+```{r Libraries_and_data_loading,echo=FALSE,warning=FALSE,error=FALSE,message=FALSE}
+## Load libraries
+library(caret)
+library(randomForest)
+
+## Clear environment
+rm(list = ls())
+
+## Set up data directory
+if(!file.exists("./data")) dir.create("./data")
+
+## Set up submission directory for result files
+if(!file.exists("./submission")) dir.create("./submission")
+
+## Download training data file if necessary
+if(!file.exists("./data/pml-training.csv")) {
+        trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(url = trainUrl, destfile="./data/pml-training.csv", mode='wb')
+}
+
+## Download testing data file if necessary
+if(!file.exists("./data/pml-testing.csv")) {
+        testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(testUrl, destfile="./data/pml-testing.csv", mode='wb')
+}
+
+## Ingest training and test files as dataframes
+full_training <- read.csv("./data/pml-training.csv", na.strings=c("NA","#DIV/0!",""))
+full_testing <- read.csv("./data/pml-testing.csv", na.strings=c("NA","#DIV/0!",""))
+```
+
+
+The provided test set consists of `r dim(full_testing)[1]` records only.
+The training dataset contains (`r dim(full_training)[1]` records).
+The validation dataset will be used to obtain an unbiased out-of-sample prediction error estimate prior to application to the test set.
+
+### Partition data
+
+The original training dataset is partitioned into "training" and "validation" subsets in the ratio 60:40. We will apply four-fold cross-validation.
+
+```{r Partition_data,echo=FALSE,warning=FALSE,error=FALSE}
+set.seed(20150922)
+inTrain <- createDataPartition(y = full_training$classe, times = 1, p = 0.6, list = FALSE)
+training <- full_training[inTrain,]
+validation <- full_training[-inTrain,]
+```
+
+
+### Examine data
+
+The 'classe' variable in the raw training dataset has the follwing frequencies:
+`r table(full_training$classe)`
+
+```{r Response_variable_histogram,echo=FALSE,warning=FALSE,error=FALSE,fig.height=3}
+library(ggplot2)
+### Use colourblindness-friendly palette.
+cbPalette <- c("#999999", "#009E73", "#D55E00", "#0072B2", "#CC79A7", "#F0E442")
+
+g <- ggplot(full_training, aes(x = classe, fill = classe)) +
+        scale_fill_manual(values = cbPalette) +
+        geom_bar() +
+        guides(fill=FALSE) + theme_bw() +
+        labs(x = "Activity Class ('classe')", y = "Count", title = "Activity Class ('classe') Histogram - raw training dataset")
+print(g)
+```
+
+
+
+### Training variable selection
+
+#### Ascertain columns containing missing values
+
+To avoid model fitting difficulties due to missing predictor values, those columns for which the proportion of missing values exceeds 5% are dropped.
+
+```{r Assess_NA_columns,echo=FALSE,warning=FALSE}
+## Function NARatio returns proportion of NAs within specified vector x.
+NAratio <- function(x){
+        numNAs <- 0
+        for(i in 1:length(x))
+                if(is.na(x[i])) numNAs <- numNAs + 1
+                numNAs / length(x) ## Proportion of NAs within vector x.
+}
+
+## Apply NAratio across all columns in training dataset to establish which columns
+## will be retained (i.e. have sufficiently small ratio of NAs).
+NA_Cols <- apply(training, 2, NAratio)
+
+## Subset the training data
+origNumCols <- dim(training)[2]
+training <- training[, NA_Cols <= 0.05]
+finalNumCols <- dim(training)[2] ## This drops 100 variables.
+```
+
+This operation reduces the number of candidate variables by `r origNumCols - finalNumCols` to a total of `r finalNumCols`.
+
+### Remove identifiers and timestamps
+
+We assume that the observation time and sequence does not influence the outcome. The following are not predictor candidates, hence will be removed from the training data:
+
+* 'X'
+
+* 'user_name'
+
+* 'raw_timestamp_part_1'
+
+* 'raw_timestamp_part_2'
+
+* 'cvtd_timestamp'
+
+
+```{r Remove_identifiers_and_timestamps,echo=FALSE,warning=FALSE,error=FALSE}
+training$X <- NULL
+training$user_name <- NULL
+cut <- grep("timestamp", names(training), value = TRUE)
+for(i in 1:length(cut)) training[, cut[i]] <-  NULL
+cut <- grep("window", names(training), value = TRUE)
+for(i in 1:length(cut)) training[, cut[i]] <-  NULL
+```
+
+### Determine and exclude variables with near zero variance
+
+The near zero variance status of all remaining variables is tabulated below. It is evident that any such variables have been excluded by earlier cuts, hence this list constitutes the finalized set of variables. All variables listed except 'classe' (the outcome variable) will be modelled as predictors.
+
+```{r Check_for_near_zero_variance1,echo=FALSE,warning=FALSE,error=FALSE}
+nearZero <- nearZeroVar(training, saveMetrics=TRUE)
+training <- training[, nearZero$zeroVar == FALSE & nearZero$nzv == FALSE]
+
+print(nearZero)
+```
+
+
+### Align validation and final test data with training data
+
+The validation and testing data are subsetted to include only those variables that exist in the finalized parameter set for the training data (excluding 'classe').
+
+```{r Reduce_testing_data,echo=FALSE,warning=FALSE,error=FALSE}
+validation <- validation[, colnames(training)]  ## Retain classe in validation
+testing <- full_testing[, colnames(training[, -53])]
+```
+
+### Normalization
+
+Numeric data are centered and scaled via the caret preProcess function. The normalization is not strictly necessary for model generation in this case, but allows more intuitive comparison of variable distributions in the visualization plots.
+
+```{r Normalize_data,echo=FALSE,warning=FALSE,error=FALSE}
+## Normalize training data -- exclude outcome variable
+preObj <- preProcess(training[, -53], method = c("center", "scale"))
+training <- cbind(predict(preObj, training[, -53]), training$classe)
+colnames(training)[53] <- "classe"
+
+## Normalize validation data relative to train data
+validation <- cbind(predict(preObj, validation[-53]), validation$classe)
+colnames(validation)[53] <- "classe"
+
+## Normalize testing data relative to train data
+testing <- predict(preObj, testing)
+```
+
+### Visualization
+
+Plots of pairwise relationships for the 52 predictor variables seem to provide more confusion than insight. For each level of `classe` in the training data we instead elect to represent the distribution of each *normalized* predictor in the form of lattice boxplots.  These are arrayed in two grids for ease of presentation.
+
+#### Predictors 1 - 26
+```{r Visualization_1,echo=FALSE,warning=FALSE,error=FALSE,fig.width=9,fig.height=10}
+
+featurePlot(x = training[, 1:26],
+                  y = training$classe,
+                  plot = "box",
+                  ## Options for bwplot() 
+                  scales = list(y = list(relation="free"),
+                                x = list(rot = 90), cex = 0.3),
+                  layout = c(5, 7),
+                  auto.key = list(columns = 2))
+```
+
+#### Predictors 27 - 52
+```{r Visualization_2,echo=FALSE,warning=FALSE,error=FALSE,fig.width=9,fig.height=10}
+
+featurePlot(x = training[, 26:52],
+                  y = training$classe,
+                  plot = "box",
+                  ## Options for bwplot() 
+                  scales = list(y = list(relation="free"),
+                                x = list(rot = 90), cex = 0.3),
+                  layout = c(5, 7),
+                  auto.key = list(columns = 2))
+```
+
+## Model selection
+
+Given the relatively large number of predictors, it is not intuitively obvious which are likely to prove significant. An algorithm that self-selects the most important predictors from the candidate set, such as Random Forest, is therefore attractive. This will be applied with 4-fold cross-validation.
+
+```{r Train_rf_model,echo=FALSE,warning=FALSE,cache=TRUE}
+
+## Train model with 4-fold cross-validation.
+fitControl <- trainControl(method = "cv", number = 4, verboseIter = F)
+rfModelFit <- train(classe ~ ., data = training, method = "rf", trControl = fitControl)
+```
+
+### Error estimates
+
+#### In-sample statistics
+
+```{r In_Sample_Error_Estimates,echo=FALSE,warning=FALSE,error=FALSE}
+
+inSampleCM <- confusionMatrix(training$classe, predict(rfModelFit, training))
+inSampleErrorRatePC <- (1 - inSampleCM$overall[1])*100
+estOutSampleErrorRatePC <- mean(rfModelFit$finalModel$err.rate[1,])
+
+inSampleCM ## Print in-sample confusion matrix
+```
+The actual in-sample error rate for the *training* data is `r signif(inSampleErrorRatePC, 2)`%.
+
+The predicted out of sample error *based solely on model cross-validation in the training dataset* is `r signif(estOutSampleErrorRatePC, 2)`%.
+
+#### Cross-validation accuracy by number of predictors
+
+The following plot shows the relationship between the number of predictors randomly selected by the algorithm and the accuracy determined during cross-validation. Although no fine-grained detail is available, it seems that maximum accuracy is obtained where about half of the 52 predictors are used, and that the rest of the predictors increase the noise.
+
+```{r ROC,echo=FALSE,warning=FALSE,error=FALSE,fig.height=5,fig.width=6}
+plot(rfModelFit)
+```
+
+#### Relative importance of predictors
+
+The following plot shows the relative importance of each predictor, as determined by the model fit.
+
+```{r Variable_Importance,echo=FALSE,warning=FALSE,error=FALSE, fig.width=5,fig.height=7.5}
+## Plot sorted comparison of predictors by importance.
+plot(varImp(rfModelFit), main = "Relative importance of predictors", ylab = "Predictor")
+```
+
+
+#### Out-of-sample error rate estimates based on validation dataset
+
+The following statistics result from application of the model (trained and cross-validated on the training data) to the validation set. 
+
+```{r Out_Of_Sample_Error_Estimates,echo=FALSE,warning=FALSE,error=FALSE}
+validationCM <- confusionMatrix(validation$classe, predict(rfModelFit, validation))
+outSampleErrorRatePC <- 1 - validationCM$overall[1]
+
+validationCM
+```
+
+The out-of-sample estimate of the error rate for this model is `r signif(outSampleErrorRatePC, 2)`%, which is in line with (and indeed slightly less than)  the OOB Error rate predicted by cross-validation within the training set. Although out of scope of this study, it is interesting to speculate whether use of the former metric could in some contexts replace the estimate generated from validation data, allowing more of the available data to be used in training.
+
+In any case the out-of-sample accuracy exceeds our initial target, therefore predictions on the test set will be attempted.
+
+## Predictions on test set
+
+The model is applied to the testing dataset to generate predictions for submission. The following results were obtained, corresponding to Problem ID 1 through 20
+
+```{r Predictions_test,echo=FALSE,warning=FALSE,error=FALSE,message=FALSE}
+testPredictions <- predict(rfModelFit, testing)
+testPredictions
+```
+
+
+```{r Prepare_For_Submission,echo=FALSE,warning=FALSE,error=FALSE,cache=TRUE,eval=FALSE}
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("./submission/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(as.character(testPredictions))
+```
+
+## References
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises#ixzz3mYc33R40
+
