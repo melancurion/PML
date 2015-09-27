@@ -99,22 +99,9 @@ validation <- full_training[-inTrain,]
 ### Examine data
 
 The 'classe' variable in the raw training dataset has the follwing frequencies:
-`r table(full_training$classe)`
+`r table(full_training$classe)`.
 
-```{r Response_variable_histogram,echo=FALSE,warning=FALSE,error=FALSE,fig.height=3}
-library(ggplot2)
-### Use colourblindness-friendly palette.
-cbPalette <- c("#999999", "#009E73", "#D55E00", "#0072B2", "#CC79A7", "#F0E442")
-
-g <- ggplot(full_training, aes(x = classe, fill = classe)) +
-        scale_fill_manual(values = cbPalette) +
-        geom_bar() +
-        guides(fill=FALSE) + theme_bw() +
-        labs(x = "Activity Class ('classe')", y = "Count", title = "Activity Class ('classe') Histogram - raw training dataset")
-print(g)
-```
-
-
+Visualizations of the predictor variables are shown in a subsequent section (following normalization).
 
 ### Training variable selection
 
